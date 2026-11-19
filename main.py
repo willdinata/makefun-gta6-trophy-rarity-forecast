@@ -69,14 +69,19 @@ def collect_snapshots(history, trophy_count):
 
 
 def build_player_path(snapshots):
-    players = [snapshot["players"] for snapshot in snapshots]
-    last_players = players[-1]
+    fit_snapshots = []
+    for snapshot in snapshots:
+        if not fit_snapshots or snapshot["players"] != fit_snapshots[-1]["players"]:
+            fit_snapshots.append(snapshot)
+
+    players = [snapshot["players"] for snapshot in fit_snapshots]
+    last_players = snapshots[-1]["players"]
 
     if len(set(players)) < 2:
         return lambda _hour: last_players
 
-    xs = [math.log1p(snapshot["hour"]) for snapshot in snapshots]
-    ys = [math.log(snapshot["players"]) for snapshot in snapshots]
+    xs = [math.log1p(snapshot["hour"]) for snapshot in fit_snapshots]
+    ys = [math.log(snapshot["players"]) for snapshot in fit_snapshots]
     x_mean = sum(xs) / len(xs)
     y_mean = sum(ys) / len(ys)
     denominator = sum((value - x_mean) ** 2 for value in xs)
@@ -111,7 +116,9 @@ def calculate_hazards(snapshots, earned, trophy_count):
             current_earned = earned[index][trophy_index]
             if previous_earned is None or current_earned is None:
                 continue
-            delta_earned = max(current_earned - previous_earned, 0.0)
+            delta_earned = current_earned - previous_earned
+            if delta_earned < 0.0:
+                continue
             pool_average = max(
                 (
                     previous["players"]
@@ -127,8 +134,12 @@ def calculate_hazards(snapshots, earned, trophy_count):
 
         previous_pool = trophy_count * previous["players"] - previous["total"]
         current_pool = trophy_count * current["players"] - current["total"]
-        pooled_numerator += max(current["total"] - previous["total"], 0.0)
-        pooled_denominator += max((previous_pool + current_pool) / 2.0, 0.0) * gap_days
+        pooled_delta = current["total"] - previous["total"]
+        if pooled_delta >= 0.0:
+            pooled_numerator += pooled_delta
+            pooled_denominator += (
+                max((previous_pool + current_pool) / 2.0, 0.0) * gap_days
+            )
 
     pooled_hazard = pooled_numerator / pooled_denominator if pooled_denominator > 0.0 else 0.0
     return [
@@ -179,8 +190,8 @@ def forecast_case(case):
         known_rates = [rate for rate in recent_rates if rate is not None]
         fallback_rate = float(median(known_rates)) if known_rates else 1.0
         last_rates = [rate if rate is not None else fallback_rate for rate in recent_rates]
-        last_earned = [rate * last_players / 100.0 for rate in last_rates]
-        universal = [value >= last_players - 0.5 for value in last_earned]
+        effective_last_earned = [rate * last_players / 100.0 for rate in last_rates]
+        universal = [value >= last_players - 0.5 for value in effective_last_earned]
 
         if snapshot_count >= 2:
             player_path = build_player_path(snapshots)
@@ -193,7 +204,7 @@ def forecast_case(case):
                     medians.append(99.9)
                     continue
 
-                projected_earned = last_earned[trophy_index]
+                projected_earned = effective_last_earned[trophy_index]
                 step_start = last_snapshot["hour"]
                 while step_start < target_hour:
                     step_end = min(step_start + 12.0, target_hour)
@@ -234,7 +245,7 @@ def forecast_case(case):
                     medians.append(99.9)
                 elif launch_refresh:
                     refreshed_earned = min(
-                        last_earned[trophy_index] * growth, refreshed_players
+                        effective_last_earned[trophy_index] * growth, refreshed_players
                     )
                     medians.append(100.0 * refreshed_earned / refreshed_players)
                 else:
@@ -250,7 +261,7 @@ def forecast_case(case):
         )
         model_spread = 0.35 / math.sqrt(snapshot_count)
         sigmas = []
-        for value in last_earned:
+        for value in effective_last_earned:
             small_spread = 0.20 if value < 10.0 else 0.0
             sigma = math.sqrt(
                 base_spread**2
